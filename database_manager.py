@@ -9,8 +9,8 @@ if __name__ == "__main__":
     parser.add_argument('-r', '--refresh') # refresh ranking
 
     fetcher = DataFetcher(
-        db_path="steam_top_100.db",
-        target_count=5000,
+        db_path="steam_top_100x200.db",
+        target_count=100,
         filter_mode="globaltopsellers",
     )
 
@@ -19,11 +19,11 @@ if __name__ == "__main__":
     update = True if args.update == 'y' else False
     refresh = True if args.refresh == 'y' else False
 
-    if update == 'y':
+    if update:
         fetcher.fetch_and_store()
 
     # Round 2: Use stored URL to scrape details
     fetcher.fetch_additional_details_from_store(update=update)
 
     # Round 3: Scrape top 100 reviews for each game
-    fetcher.scrape_reviews(reviews_per_game=100, update=update)
+    fetcher.scrape_reviews(reviews_per_game=200, update=update)
