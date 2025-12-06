@@ -1,5 +1,5 @@
 [project]
-name = "Steam Game Recommendation System"
+name = "steam_game_recommendation_system"
 version = "0.1.0"
 description = "Agentic Steam Game Recommendation System"
 readme = "README.md"
