@@ -133,8 +133,116 @@ def get_similar_games(
         )
     return results
 
+# review_analyzer.py
 
-CUSTOM_TOOLS = [get_current_time, get_similar_games]
+import sqlite3
+import re
+from typing import List, Dict, Literal
+
+import numpy as np
+import pandas as pd
+
+
+# ================================
+# 1) 定义四大类别关键词
+# ================================
+
+CATEGORIES = {
+    "gameplay": [
+        "combat","melee","ranged","shooting","aim","accuracy","recoil",
+        "movement","sprint","dash","dodge","roll","parry","block","counter",
+        "weapon","gun","rifle","pistol","shotgun","bow","sword","ammo","reload",
+        "enemy","boss","npc","ai","stealth",
+        "mechanic","system","feature","mission","quest","progression",
+        "build","perk","talent","skilltree","ability","cooldown",
+        "loot","inventory","equipment","armor","upgrade"
+    ],
+    "performance": [
+        "performance","optimization","lag","stutter","fps","framerate",
+        "crash","freeze","bug","glitch","exploit","shader","loading","tearing"
+    ],
+    "content": [
+        # story + world
+        "story","narrative","writing","dialogue","character","plot","lore","world",
+        # content amount
+        "content","replayability","openworld","sandbox","questline","campaign",
+        # ui/visual
+        "ui","hud","interface","accessibility","visual","graphics","lighting",
+        "effect","sound","audio","music","soundtrack","voice"
+    ]
+}
+
+
+@tool
+def summarize_reviews(appid: int, max_sentences: int = 100):
+    """
+    Summarize gameplay, performance, content, and sentiment
+    using evidence-based keyword filtering + AI summarization.
+    Only uses REAL sentences from real reviews.
+    Summarize in keywords and bullet points.
+    """
+
+    import sqlite3
+    import re
+    import pandas as pd
+
+    from langchain_openai import ChatOpenAI
+    llm = ChatOpenAI(model="gpt-4.1-mini", temperature=0)
+
+    # --- 1. Load reviews ---
+    conn = sqlite3.connect("steam_top_2000x100.db")
+    df = pd.read_sql(f"SELECT clean_review, votes_up, help_score FROM steam_reviews WHERE appid={appid};", conn)
+    conn.close()
+
+    if df.empty:
+        return {"error": "No reviews found for this appid"}
+
+    def extract(df, keywords):
+        if not keywords:
+            return []
+
+        pattern = "|".join([re.escape(k) for k in keywords])
+        mask = df["clean_review"].str.contains(pattern, case=False, regex=True)
+        return (
+            df[mask]
+            .sort_values("help_score", ascending=False)
+            ["clean_review"]
+            .head(max_sentences)
+            .tolist()
+        )
+
+    pos = df[df["votes_up"] > 0]["clean_review"].head(max_sentences).tolist()
+    neg = df[df["votes_up"] == 0]["clean_review"].head(max_sentences).tolist()
+
+    def summarize(texts, title):
+        if not texts:
+            return f"No {title} related comments found."
+        prompt = f"""
+            Summarize the following player review sentences about **{title}**.
+
+            RULES:
+            - Only summarize content present in the sentences.
+            - No hallucinations.
+            - Use 2–5 short bullet points.
+            - Prioritize high-frequency issues and praises.
+
+            Sentences:
+            {chr(10).join(texts)}
+            """
+        return llm.invoke(prompt).content
+
+    result = {
+        "sentiment_positive": summarize(pos, "positive feedback"),
+        "sentiment_negative": summarize(neg, "negative feedback"),
+        "gameplay": summarize(extract(df, CATEGORIES["gameplay"]), "gameplay"),
+        "performance": summarize(extract(df, CATEGORIES["performance"]), "performance"),
+        "content": summarize(extract(df, CATEGORIES["content"]), "content / UI / visual / world"),
+    }
+
+    return result
+
+
+CUSTOM_TOOLS = [get_current_time, get_similar_games, summarize_reviews]
 
 
 
@@ -160,7 +268,7 @@ def build_agent():
             "finds games similar to a given input based on a chosen semantic category. "
             "If get_similar_games return the same games in the same series, increase k and look for other similar games"
             "The category option 'tags' focuses on user-defined tags, 'genres' focuses "
-            "on genre information, 'about' focuses on description and theme, 'reviews' "
+            "on genre information, 'clean_about' focuses on description and theme, 'reviews' "
             "focuses on how players talk about the game, and 'mixed' combines all "
             "available text fields into a single similarity profile. "
             "Use SQL when the user needs exact filters or numeric comparisons. "
@@ -169,6 +277,7 @@ def build_agent():
             "When making recommendations, clearly explain why each game fits the request, "
             "name the games directly, and include insights or sentiment summaries from "
             "the 'steam_reviews' table when relevant. "
+            "use the 'steam_reviews' table's 'clean_review' column to get a sense of the public opinion of a game in a cleaner way."
             "Call get_current_time every time and be aware of the date of request"
             "When recommending multiple games, always recommend the one with better reviews and more player counts"
             "Don't recommend multiple games in the same franchise to user, but always recommand more than two games"
