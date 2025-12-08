@@ -1,6 +1,6 @@
 import os
 from datetime import datetime
-from typing import Any, Dict, List, Literal
+from typing import Optional, Tuple, Dict, Any, List, Literal
 
 from langchain_openai import ChatOpenAI
 from langchain_community.utilities import SQLDatabase
@@ -9,6 +9,12 @@ from langchain_chroma import Chroma
 from langchain_core.tools import tool
 from langchain_core.embeddings import Embeddings
 from sentence_transformers import SentenceTransformer
+
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+import pandas as pd
+from sqlalchemy import create_engine
+import json
 
 
 PERSIST_DIR = "steam_vector_store"
@@ -131,121 +137,230 @@ def get_similar_games(
         )
     return results
 
-# review_analyzer.py
+mpl.rcParams["font.family"] = "DejaVu Sans"
+mpl.rcParams["figure.figsize"] = (10, 6)
+mpl.rcParams["axes.titlesize"] = 16
+mpl.rcParams["axes.labelsize"] = 13
+mpl.rcParams["xtick.labelsize"] = 11
+mpl.rcParams["ytick.labelsize"] = 11
+mpl.rcParams["legend.fontsize"] = 11
 
-@tool
-def summarize_reviews(
-    appid: int,
-    max_sentences: int = 80,
-):
-    """
-    Summarize Steam reviews concisely (2–3 bullets each section).
-    Uses sqlite3 directly and compresses repeated concepts.
-    """
+COLOR_PRIMARY = "#1f77b4"
+COLOR_SECONDARY = "#ff7f0e"
+COLOR_TERTIARY = "#2ca02c"
 
-    import re
-    from typing import List
-    import pandas as pd
-    import sqlite3
+ENGINE = create_engine("sqlite:///steam_clean_top2000.db")
 
-    # --- Load reviews using agent's SQL engine ---
-    # query = f"SELECT clean_review, votes_up, help_score FROM steam_reviews WHERE appid = {appid};"
-    DB_PATH = "steam_top_2000x100.db"
 
-    # --- Load reviews using sqlite3 (same approach as build_steam_vector_store.py) ---
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(
-        f"""
-        SELECT clean_review, votes_up, help_score
-        FROM steam_reviews
-        WHERE appid = {appid}
-        """
-    )
-    rows = cur.fetchall()
-    conn.close()
+def _style_axes(
+    ax: plt.Axes, title: str, xlabel: Optional[str], ylabel: Optional[str]
+) -> None:
+    ax.set_title(title)
+    if xlabel:
+        ax.set_xlabel(xlabel)
+    if ylabel:
+        ax.set_ylabel(ylabel)
+    ax.grid(True, linestyle="--", alpha=0.3)
 
-    if not rows:
-        return {"error": "No reviews found for this appid"}
 
-    # Convert to DataFrame
-    df = pd.DataFrame(rows, columns=["clean_review", "votes_up", "help_score"])
-
-    # df = pd.DataFrame(df)
-
-    # --- keyword categories ---
-    CATEGORIES = {
-        "gameplay": [
-            "combat","melee","ranged","shooting","aim","accuracy","recoil",
-            "movement","sprint","dash","dodge","roll","parry","block","counter",
-            "weapon","gun","rifle","pistol","shotgun","bow","sword","ammo","reload",
-            "enemy","boss","npc","ai","stealth",
-            "mechanic","system","feature","mission","quest","progression",
-            "build","perk","talent","skilltree","ability","cooldown",
-            "loot","inventory","equipment","armor","upgrade"
-        ],
-        "performance": [
-            "performance","optimization","lag","stutter","fps","framerate",
-            "crash","freeze","bug","glitch","exploit","shader","loading","tearing"
-        ],
-        "content": [
-            # story + world
-            "story","narrative","writing","dialogue","character","plot","lore","world",
-            # content amount
-            "content","replayability","openworld","sandbox","questline","campaign",
-            # ui/visual
-            "ui","hud","interface","accessibility","visual","graphics","lighting",
-            "effect","sound","audio","music","soundtrack","voice"
-        ]
-    }
-
-    def extract(df, keywords):
-        pattern = "|".join([re.escape(k) for k in keywords])
-        mask = df["clean_review"].str.contains(pattern, case=False, regex=True)
-        return (
-            df[mask]
-            .sort_values("help_score", ascending=False)
-            ["clean_review"]
-            .head(max_sentences)
-            .tolist()
+def _annotate_bar_values(ax: plt.Axes, bars) -> None:
+    for bar in bars:
+        height = bar.get_height()
+        ax.annotate(
+            f"{height:.0f}",
+            xy=(bar.get_x() + bar.get_width() / 2, height),
+            xytext=(0, 3),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=10,
+            color="black",
         )
 
-    pos = df[df["votes_up"] > 0]["clean_review"].head(max_sentences).tolist()
-    neg = df[df["votes_up"] == 0]["clean_review"].head(max_sentences).tolist()
 
-    llm = build_llm()
+def _draw_single_plot(plot_cfg: Dict[str, Any], idx: int) -> None:
+    chart_type = plot_cfg.get("chart_type")
+    sql = plot_cfg.get("sql_query")
+    x_field = plot_cfg.get("x_field")
+    y_field = plot_cfg.get("y_field")
+    reason = plot_cfg.get("reason", f"Plot {idx}")
 
-    def summarize(texts, title):
-        if not texts:
-            return f"No {title} related comments found."
-        prompt = f"""
-        Summarize the following player review sentences about **{title}**.
+    print(f"\n[Plot {idx}] {reason}")
+    if not sql:
+        print(f"[WARN] Plot {idx}: empty sql_query, skip.")
+        return
 
-        RULES:
-        - base summary *only* on what appears in the text
-        - combine and compress repeated or similar points
-        - remove filler / redundant comments
-        - avoid long explanations
-        - output 2–4 short bullet points**
-        - bullets must be crisp, factual, non-hallucinated
+    try:
+        df = pd.read_sql_query(sql, ENGINE)
+    except Exception as e:
+        print(f"[ERROR] Plot {idx}: SQL failed.")
+        print("Error:", e)
+        print("SQL:", sql)
+        return
 
-        Sentences:
-        {chr(10).join(texts)}
-        """
-        return llm.invoke(prompt).content
+    if df.empty:
+        print(f"[INFO] Plot {idx}: query returned no rows, skip.")
+        return
 
-    result = {
-        "positive": summarize(pos, "positive feedback"),
-        "negative": summarize(neg, "negative feedback"),
-        "gameplay": summarize(extract(df, CATEGORIES["gameplay"]), "gameplay"),
-        "performance": summarize(extract(df, CATEGORIES["performance"]), "performance"),
-        "content": summarize(extract(df, CATEGORIES["content"]), "content & world & UI"),
-    }
+    print(f"[INFO] Plot {idx}: Data columns:", df.columns.tolist())
 
-    return result
+    fig, ax = plt.subplots()
+
+    if chart_type == "bar":
+        if x_field not in df.columns or y_field not in df.columns:
+            print(f"[WARN] Plot {idx}: bar needs x_field={x_field}, y_field={y_field}.")
+            plt.close(fig)
+            return
+
+        n = len(df)
+        cmap = plt.cm.get_cmap("tab20", max(n, 3))
+        colors = [cmap(i) for i in range(n)]
+
+        bars = ax.bar(df[x_field], df[y_field], color=colors)
+        plt.xticks(rotation=45, ha="right")
+        _style_axes(ax, reason, x_field, y_field)
+
+        from matplotlib.patches import Patch
+
+        handles = [
+            Patch(color=colors[i], label=str(df[x_field].iloc[i])) for i in range(n)
+        ]
+        ax.legend(
+            handles=handles,
+            title="Game",
+            bbox_to_anchor=(1.02, 1),
+            loc="upper left",
+            borderaxespad=0.0,
+        )
+        _annotate_bar_values(ax, bars)
+
+    elif chart_type == "line":
+        if x_field not in df.columns or y_field not in df.columns:
+            print(
+                f"[WARN] Plot {idx}: line needs x_field={x_field}, y_field={y_field}."
+            )
+            plt.close(fig)
+            return
+
+        ax.plot(
+            df[x_field],
+            df[y_field],
+            color=COLOR_PRIMARY,
+            marker="o",
+            label=y_field,
+        )
+        plt.xticks(rotation=45, ha="right")
+        _style_axes(ax, reason, x_field, y_field)
+        ax.legend()
+
+    elif chart_type == "scatter":
+        if x_field not in df.columns or y_field not in df.columns:
+            print(
+                f"[WARN] Plot {idx}: scatter needs x_field={x_field}, y_field={y_field}."
+            )
+            plt.close(fig)
+            return
+
+        ax.scatter(
+            df[x_field],
+            df[y_field],
+            color=COLOR_PRIMARY,
+            alpha=0.7,
+            edgecolor="black",
+            label=f"{y_field} vs {x_field}",
+        )
+        _style_axes(ax, reason, x_field, y_field)
+        ax.legend()
+
+    elif chart_type == "histogram":
+        col = x_field or y_field
+        if col not in df.columns:
+            print(f"[WARN] Plot {idx}: histogram needs numeric column '{col}'.")
+            plt.close(fig)
+            return
+
+        ax.hist(
+            df[col].dropna(),
+            bins=20,
+            color=COLOR_PRIMARY,
+            alpha=0.85,
+            edgecolor="white",
+            label=col,
+        )
+        _style_axes(ax, reason, col, "count")
+        ax.legend()
+
+    elif chart_type == "box":
+        col = y_field or x_field
+        if col not in df.columns:
+            print(f"[WARN] Plot {idx}: box needs numeric column '{col}'.")
+            plt.close(fig)
+            return
+
+        ax.boxplot(df[col].dropna(), patch_artist=True)
+        for patch in ax.artists:
+            patch.set_facecolor(COLOR_PRIMARY)
+        _style_axes(ax, reason, "", col)
+
+    elif chart_type == "pie":
+        if x_field not in df.columns or y_field not in df.columns:
+            print(f"[WARN] Plot {idx}: pie needs x_field={x_field}, y_field={y_field}.")
+            plt.close(fig)
+            return
+
+        ax.pie(
+            df[y_field],
+            labels=df[x_field],
+            autopct="%1.1f%%",
+            startangle=140,
+        )
+        ax.set_title(reason)
+        ax.axis("equal")
+
+    else:
+        print(f"[WARN] Plot {idx}: unknown chart_type '{chart_type}', skip.")
+        plt.close(fig)
+        return
+
+    plt.tight_layout()
+    plt.show()
 
 
-CUSTOM_TOOLS = [get_current_time, get_similar_games, summarize_reviews]
+def _visualize_from_plan_internal(plan: Dict[str, Any]) -> int:
+    """Internal helper: draw all plots from a VIS_PLAN_JSON-like dict. Returns number of plots."""
+    plots: List[Dict[str, Any]] = plan.get("plots") or []
+    if not plots:
+        print("[INFO] VIS_PLAN_JSON has no plots.")
+        return 0
+
+    count = 0
+    for idx, p in enumerate(plots, start=1):
+        _draw_single_plot(p, idx)
+        count += 1
+    return count
+
+
+@tool
+def visualize_from_plan(plan: Dict[str, Any]) -> str:
+    """
+    LangChain tool: given a VIS_PLAN_JSON-style dict with a top-level 'plots' list,
+    execute the SQL queries, render matplotlib charts, and return a short summary.
+
+    This tool is mainly for use by external callers or advanced agents; the CLI
+    at the bottom of this file also calls the same internal logic.
+    """
+    if plan is None:
+        return "No visualization plan was provided, so no plots were generated."
+    try:
+        n = _visualize_from_plan_internal(plan)
+        if n == 0:
+            return "No plots were generated because the plan contained an empty 'plots' list."
+        return f"Rendered {n} plot(s) based on the visualization plan."
+    except Exception as e:
+        return f"Failed to render plots from plan due to error: {e}"
+
+
+CUSTOM_TOOLS = [get_current_time, get_similar_games, visualize_from_plan]
 
 
 def build_agent():
@@ -318,6 +433,31 @@ def build_agent():
     return agent
 
 
+def split_answer_and_vis_plan(text: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+    lines = text.splitlines()
+    vis_line = None
+    for line in lines:
+        if line.strip().startswith("VIS_PLAN_JSON:"):
+            vis_line = line.strip()
+            break
+
+    if vis_line is None:
+        return text, None
+
+    main_lines = [l for l in lines if l.strip() != vis_line]
+    main_text = "\n".join(main_lines).strip()
+
+    json_str = vis_line.split("VIS_PLAN_JSON:", 1)[1].strip()
+    try:
+        plan = json.loads(json_str)
+    except json.JSONDecodeError:
+        print("[WARN] Failed to parse VIS_PLAN_JSON JSON. Raw line:")
+        print(vis_line)
+        return main_text, None
+
+    return main_text, plan
+
+
 def interactive_loop(agent):
     while True:
         try:
@@ -331,13 +471,21 @@ def interactive_loop(agent):
         if not user_input.strip():
             continue
 
-
         resp = agent.invoke({"input": user_input})
+        full_text = resp["output"]
+
+        main_text, plan = split_answer_and_vis_plan(full_text)
 
         print("\nAgent:", resp["output"], "\n")
+        if plan is not None:
+            _visualize_from_plan_internal(plan)
+        else:
+            print("[INFO] No VIS_PLAN_JSON found; skipping visualization.")
         print('-*'*50)
 
 
 if __name__ == "__main__":
+    if not os.getenv("OPENAI_API_KEY"):
+        raise RuntimeError("missing api key")
     agent = build_agent()
     interactive_loop(agent)
