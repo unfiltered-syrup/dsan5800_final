@@ -135,72 +135,57 @@ def get_similar_games(
 
 # review_analyzer.py
 
-import sqlite3
-import re
-from typing import List, Dict, Literal
-
-import numpy as np
-import pandas as pd
-
-
-# ================================
-# 1) 定义四大类别关键词
-# ================================
-
-CATEGORIES = {
-    "gameplay": [
-        "combat","melee","ranged","shooting","aim","accuracy","recoil",
-        "movement","sprint","dash","dodge","roll","parry","block","counter",
-        "weapon","gun","rifle","pistol","shotgun","bow","sword","ammo","reload",
-        "enemy","boss","npc","ai","stealth",
-        "mechanic","system","feature","mission","quest","progression",
-        "build","perk","talent","skilltree","ability","cooldown",
-        "loot","inventory","equipment","armor","upgrade"
-    ],
-    "performance": [
-        "performance","optimization","lag","stutter","fps","framerate",
-        "crash","freeze","bug","glitch","exploit","shader","loading","tearing"
-    ],
-    "content": [
-        # story + world
-        "story","narrative","writing","dialogue","character","plot","lore","world",
-        # content amount
-        "content","replayability","openworld","sandbox","questline","campaign",
-        # ui/visual
-        "ui","hud","interface","accessibility","visual","graphics","lighting",
-        "effect","sound","audio","music","soundtrack","voice"
-    ]
-}
-
-
 @tool
-def summarize_reviews(appid: int, max_sentences: int = 100):
+def summarize_reviews(
+    appid: int,
+    max_sentences: int = 80,
+):
     """
-    Summarize gameplay, performance, content, and sentiment
-    using evidence-based keyword filtering + AI summarization.
-    Only uses REAL sentences from real reviews.
-    Summarize in keywords and bullet points.
+    Summarize reviews for gameplay, performance, content, and sentiment.
+    Uses SQLDatabase (agent-connected) instead of opening DB manually.
+    Does NOT hallucinate — only summarizes based on extracted real review sentences.
     """
 
-    import sqlite3
     import re
+    from typing import List
     import pandas as pd
 
-    from langchain_openai import ChatOpenAI
-    llm = ChatOpenAI(model="gpt-4.1-mini", temperature=0)
+    # --- Load reviews using agent's SQL engine ---
+    query = f"SELECT clean_review, votes_up, help_score FROM steam_reviews WHERE appid = {appid};"
+    df = SQLDatabase.from_uri("sqlite:///steam_top_2000x100.db").run(query)
 
-    # --- 1. Load reviews ---
-    conn = sqlite3.connect("steam_top_2000x100.db")
-    df = pd.read_sql(f"SELECT clean_review, votes_up, help_score FROM steam_reviews WHERE appid={appid};", conn)
-    conn.close()
-
-    if df.empty:
+    if df is None or len(df) == 0:
         return {"error": "No reviews found for this appid"}
 
-    def extract(df, keywords):
-        if not keywords:
-            return []
+    df = pd.DataFrame(df)
 
+    # --- keyword categories ---
+    CATEGORIES = {
+        "gameplay": [
+            "combat","melee","ranged","shooting","aim","accuracy","recoil",
+            "movement","sprint","dash","dodge","roll","parry","block","counter",
+            "weapon","gun","rifle","pistol","shotgun","bow","sword","ammo","reload",
+            "enemy","boss","npc","ai","stealth",
+            "mechanic","system","feature","mission","quest","progression",
+            "build","perk","talent","skilltree","ability","cooldown",
+            "loot","inventory","equipment","armor","upgrade"
+        ],
+        "performance": [
+            "performance","optimization","lag","stutter","fps","framerate",
+            "crash","freeze","bug","glitch","exploit","shader","loading","tearing"
+        ],
+        "content": [
+            # story + world
+            "story","narrative","writing","dialogue","character","plot","lore","world",
+            # content amount
+            "content","replayability","openworld","sandbox","questline","campaign",
+            # ui/visual
+            "ui","hud","interface","accessibility","visual","graphics","lighting",
+            "effect","sound","audio","music","soundtrack","voice"
+        ]
+    }
+
+    def extract(df, keywords):
         pattern = "|".join([re.escape(k) for k in keywords])
         mask = df["clean_review"].str.contains(pattern, case=False, regex=True)
         return (
@@ -214,29 +199,31 @@ def summarize_reviews(appid: int, max_sentences: int = 100):
     pos = df[df["votes_up"] > 0]["clean_review"].head(max_sentences).tolist()
     neg = df[df["votes_up"] == 0]["clean_review"].head(max_sentences).tolist()
 
+    llm = build_llm()
+
     def summarize(texts, title):
         if not texts:
             return f"No {title} related comments found."
         prompt = f"""
-            Summarize the following player review sentences about **{title}**.
+        Summarize the following player review sentences about **{title}**.
 
-            RULES:
-            - Only summarize content present in the sentences.
-            - No hallucinations.
-            - Use 2–5 short bullet points.
-            - Prioritize high-frequency issues and praises.
+        RULES:
+        - summarize ONLY what appears in the review text
+        - no hallucinations
+        - produce 3–5 short bullet points
+        - focus on patterns and repeated issues/praises
 
-            Sentences:
-            {chr(10).join(texts)}
-            """
+        Sentences:
+        {chr(10).join(texts)}
+        """
         return llm.invoke(prompt).content
 
     result = {
-        "sentiment_positive": summarize(pos, "positive feedback"),
-        "sentiment_negative": summarize(neg, "negative feedback"),
+        "positive": summarize(pos, "positive feedback"),
+        "negative": summarize(neg, "negative feedback"),
         "gameplay": summarize(extract(df, CATEGORIES["gameplay"]), "gameplay"),
         "performance": summarize(extract(df, CATEGORIES["performance"]), "performance"),
-        "content": summarize(extract(df, CATEGORIES["content"]), "content / UI / visual / world"),
+        "content": summarize(extract(df, CATEGORIES["content"]), "content & world & UI"),
     }
 
     return result
