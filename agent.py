@@ -141,23 +141,39 @@ def summarize_reviews(
     max_sentences: int = 80,
 ):
     """
-    Summarize reviews for gameplay, performance, content, and sentiment.
-    Uses SQLDatabase (agent-connected) instead of opening DB manually.
-    Does NOT hallucinate — only summarizes based on extracted real review sentences.
+    Summarize Steam reviews concisely (2–3 bullets each section).
+    Uses sqlite3 directly and compresses repeated concepts.
     """
 
     import re
     from typing import List
     import pandas as pd
+    import sqlite3
 
     # --- Load reviews using agent's SQL engine ---
-    query = f"SELECT clean_review, votes_up, help_score FROM steam_reviews WHERE appid = {appid};"
-    df = SQLDatabase.from_uri("sqlite:///steam_top_2000x100.db").run(query)
+    # query = f"SELECT clean_review, votes_up, help_score FROM steam_reviews WHERE appid = {appid};"
+    DB_PATH = "steam_top_2000x100.db"
 
-    if df is None or len(df) == 0:
+    # --- Load reviews using sqlite3 (same approach as build_steam_vector_store.py) ---
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        f"""
+        SELECT clean_review, votes_up, help_score
+        FROM steam_reviews
+        WHERE appid = {appid}
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
         return {"error": "No reviews found for this appid"}
 
-    df = pd.DataFrame(df)
+    # Convert to DataFrame
+    df = pd.DataFrame(rows, columns=["clean_review", "votes_up", "help_score"])
+
+    # df = pd.DataFrame(df)
 
     # --- keyword categories ---
     CATEGORIES = {
@@ -208,10 +224,12 @@ def summarize_reviews(
         Summarize the following player review sentences about **{title}**.
 
         RULES:
-        - summarize ONLY what appears in the review text
-        - no hallucinations
-        - produce 3–5 short bullet points
-        - focus on patterns and repeated issues/praises
+        - base summary *only* on what appears in the text
+        - combine and compress repeated or similar points
+        - remove filler / redundant comments
+        - avoid long explanations
+        - output 2–4 short bullet points**
+        - bullets must be crisp, factual, non-hallucinated
 
         Sentences:
         {chr(10).join(texts)}
