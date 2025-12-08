@@ -8,6 +8,10 @@ import requests
 from bs4 import BeautifulSoup
 import random
 from tqdm import tqdm
+from bs4 import BeautifulSoup, NavigableString, Tag
+
+
+DELAY = 3
 
 
 class DataFetcher:
@@ -50,8 +54,7 @@ class DataFetcher:
                     name TEXT,
                     rank INTEGER,
                     price TEXT,
-                    release_date TEXT,
-                    review_summary TEXT
+                    release_date TEXT
                 )
                 """
             )
@@ -67,6 +70,10 @@ class DataFetcher:
                 "overall_review": "TEXT",
                 "store_price": "TEXT",
                 "about": "TEXT",
+                "genres": "TEXT",
+                "recent_review_count": "INTEGER",
+                "all_review_count": "INTEGER",
+                "user_tags": "TEXT",
             }
 
             for col_name, col_type in extra_cols.items():
@@ -137,7 +144,6 @@ class DataFetcher:
             "rank": rank,
             "price": raw.get("final_formatted") or raw.get("price", ""),
             "release_date": raw.get("release_date", ""),
-            "review_summary": raw.get("review_summary", ""),
             "url": url,
         }
 
@@ -147,14 +153,13 @@ class DataFetcher:
             cur = conn.cursor()
             cur.execute(
                 """
-                INSERT INTO steam_games (appid, name, rank, price, release_date, review_summary, url)
-                VALUES (:appid, :name, :rank, :price, :release_date, :review_summary, :url)
+                INSERT INTO steam_games (appid, name, rank, price, release_date, url)
+                VALUES (:appid, :name, :rank, :price, :release_date, :url)
                 ON CONFLICT(appid) DO UPDATE SET
                     name = excluded.name,
                     rank = excluded.rank,
                     price = excluded.price,
                     release_date = excluded.release_date,
-                    review_summary = excluded.review_summary,
                     url = excluded.url
                 """,
                 game,
@@ -163,21 +168,51 @@ class DataFetcher:
         finally:
             conn.close()
 
-    def _update_game_details(self, appid, developer, recent_review, overall_review, store_price, about):
+    def _update_game_details(
+        self,
+        appid,
+        developer,
+        recent_review,
+        overall_review,
+        store_price,
+        about,
+        genres,
+        release_date,
+        recent_count,
+        overall_count,
+        user_tags,
+    ):
         conn = self._get_conn()
         try:
             cur = conn.cursor()
             cur.execute(
                 """
                 UPDATE steam_games
-                SET developer = ?,
-                    recent_review = ?,
-                    overall_review = ?,
-                    store_price = ?,
-                    about = ?
+                SET developer           = ?,
+                    recent_review       = ?,
+                    overall_review      = ?,
+                    store_price         = ?,
+                    about               = ?,
+                    genres              = ?,
+                    release_date        = COALESCE(?, release_date),
+                    recent_review_count = ?,
+                    all_review_count    = ?,
+                    user_tags           = ?
                 WHERE appid = ?
                 """,
-                (developer, recent_review, overall_review, store_price, about, appid),
+                (
+                    developer,
+                    recent_review,
+                    overall_review,
+                    store_price,
+                    about,
+                    genres,
+                    release_date,
+                    recent_count,
+                    overall_count,
+                    user_tags,
+                    appid,
+                ),
             )
             conn.commit()
         finally:
@@ -189,6 +224,7 @@ class DataFetcher:
         stored = 0
 
         for page in tqdm(range(1, pages_needed + 1), desc="Fetching search pages"):
+            self.request_delay = random.random() * DELAY
             try:
                 items = self._fetch_search_page(page)
             except Exception as e:
@@ -221,28 +257,61 @@ class DataFetcher:
     def _parse_reviews(self, soup: BeautifulSoup):
         recent_review = None
         overall_review = None
+        recent_count: Optional[int] = None
+        overall_count: Optional[int] = None
 
-        rows = soup.select("div.user_reviews_summary_row")
+        rows = soup.select(".user_reviews_summary_row")
+        if not rows:
+            return recent_review, overall_review, recent_count, overall_count
+
+        def extract_count(row: Tag):
+            span = row.select_one("span.responsive_hidden")
+            if not span:
+                return None
+            text = span.get_text(strip=True)
+            digits = re.sub(r"[^\d]", "", text)
+            return int(digits) if digits else None
+
         for row in rows:
-            label_el = row.select_one("div.subtitle")
+            subtitle_el = row.select_one("div.subtitle")
             summary_el = row.select_one("span.game_review_summary")
             if not summary_el:
                 continue
 
-            label_text = (label_el.get_text(strip=True).lower() if label_el else "")
-            summary_text = summary_el.get_text(strip=True)
+            label_text = (subtitle_el.get_text(strip=True).lower()
+                          if subtitle_el else "")
+            subtitle_classes = subtitle_el.get("class", []) if subtitle_el else []
 
+            summary_text = summary_el.get_text(strip=True)
+            count_val = extract_count(row)
+
+            # Recent reviews row
             if "recent" in label_text:
                 recent_review = summary_text
-            elif "overall" in label_text or "all reviews" in label_text:
+                if count_val is not None:
+                    recent_count = count_val
+
+            # Overall / all-time row
+            elif (
+                "all" in subtitle_classes
+                or "overall" in label_text
+                or "all reviews" in label_text
+                or "english reviews" in label_text
+            ):
                 overall_review = summary_text
+                if count_val is not None:
+                    overall_count = count_val
 
-        if not overall_review and rows:
-            summary_el = rows[0].select_one("span.game_review_summary")
-            if summary_el:
-                overall_review = summary_el.get_text(strip=True)
+        # Fallback: if we still don't have an overall but have rows,treat the last row's summary and count as overall/all-time
+        if overall_review is None and rows:
+            last_row = rows[-1]
+            last_summary = last_row.select_one("span.game_review_summary")
+            if last_summary:
+                overall_review = last_summary.get_text(strip=True)
+            if overall_count is None:
+                overall_count = extract_count(last_row)
 
-        return recent_review, overall_review
+        return recent_review, overall_review, recent_count, overall_count
 
     def _parse_developer(self, soup: BeautifulSoup):
         dev_div = soup.select_one("div#developers_list")
@@ -274,7 +343,82 @@ class DataFetcher:
         text = about_div.get_text(separator="\n", strip=True)
         return text or None
 
-    def fetch_additional_details_from_store(self, limit= None, update= False):
+    def _parse_release_date(self, soup: BeautifulSoup) -> Optional[str]:
+        date_div = soup.select_one(".release_date .date")
+        if not date_div:
+            return None
+        return date_div.get_text(strip=True)
+
+    def _parse_genres(self, soup: BeautifulSoup) -> Optional[str]:
+        # Prefer the specific container if present, fall back to generic details_block
+        container = soup.select_one("#genresAndManufacturer")
+        if not container:
+            blocks = soup.select("div.details_block")
+            if not blocks:
+                return None
+            container = blocks[0]
+
+        genre_label: Optional[Tag] = None
+        for b in container.find_all("b"):
+            text = b.get_text(strip=True).lower()
+            if text.startswith("genre"):
+                genre_label = b
+                break
+
+        if not genre_label:
+            return None
+
+        genres: List[str] = []
+
+        for sib in genre_label.next_siblings:
+            if isinstance(sib, Tag) and sib.name == "br":
+                break
+
+            if isinstance(sib, Tag):
+                if sib.name == "a":
+                    txt = sib.get_text(strip=True)
+                    if txt:
+                        genres.append(txt)
+                else:
+                    for a in sib.find_all("a"):
+                        txt = a.get_text(strip=True)
+                        if txt:
+                            genres.append(txt)
+
+            elif isinstance(sib, NavigableString):
+                parts = [p.strip() for p in str(sib).split(",") if p.strip()]
+                genres.extend(parts)
+
+        if not genres:
+            return None
+
+        seen = set()
+        uniq = []
+        for g in genres:
+            if g not in seen:
+                seen.add(g)
+                uniq.append(g)
+
+        return ", ".join(uniq) if uniq else None
+
+    def _parse_user_tags(self, soup: BeautifulSoup) -> Optional[str]:
+        container = soup.select_one(".glance_tags.popular_tags")
+        if not container:
+            return None
+
+        tags: List[str] = []
+        # Only <a.app_tag>, skip the add_button div
+        for a in container.select("a.app_tag"):
+            txt = a.get_text(strip=True)
+            if txt:
+                tags.append(txt)
+
+        if not tags:
+            return None
+
+        return ", ".join(tags)
+
+    def fetch_additional_details_from_store(self, limit=None, update=False):
         conn = self._get_conn()
         try:
             cur = conn.cursor()
@@ -319,7 +463,7 @@ class DataFetcher:
             total=len(rows),
             desc="Enriching store details",
         ):
-            self.request_delay = random.random() * 8
+            self.request_delay = random.random() * DELAY
             if not url:
                 url = self._build_app_url(appid)
 
@@ -346,10 +490,13 @@ class DataFetcher:
             soup = BeautifulSoup(resp.text, "html.parser")
 
             try:
-                recent_review, overall_review = self._parse_reviews(soup)
+                recent_review, overall_review, recent_count, overall_count = self._parse_reviews(soup)
                 developer = self._parse_developer(soup)
                 store_price = self._parse_store_price(soup)
                 about = self._parse_about(soup)
+                genres = self._parse_genres(soup)
+                release_date = self._parse_release_date(soup)
+                user_tags = self._parse_user_tags(soup)
 
                 self._update_game_details(
                     appid=appid,
@@ -358,6 +505,11 @@ class DataFetcher:
                     overall_review=overall_review,
                     store_price=store_price,
                     about=about,
+                    genres=genres,
+                    release_date=release_date,
+                    recent_count=recent_count,
+                    overall_count=overall_count,
+                    user_tags=user_tags,
                 )
             except Exception as e:
                 print(f"Error parsing/updating details for {appid}: {e}")
@@ -372,7 +524,7 @@ class DataFetcher:
         per_page = 100
 
         while len(collected) < num_reviews:
-            self.request_delay = random.random() * 8
+            self.request_delay = random.random() * DELAY
             params = {
                 "json": 1,
                 "language": language,
@@ -455,10 +607,10 @@ class DataFetcher:
 
     def scrape_reviews(
         self,
-        reviews_per_game = 100,
-        language = "english",
-        filter_type = "recent",
-        update = False,
+        reviews_per_game=100,
+        language="english",
+        filter_type="recent",
+        update=False,
     ):
         conn = self._get_conn()
         try:
