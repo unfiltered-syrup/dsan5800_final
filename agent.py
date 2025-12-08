@@ -22,7 +22,6 @@ COLLECTIONS = {
 }
 
 
-
 class LocalHFEmbeddings(Embeddings):
     """
     Local embedding model using sentence-transformers.
@@ -44,7 +43,7 @@ class LocalHFEmbeddings(Embeddings):
 
 
 def build_steam_db() -> SQLDatabase:
-    db_uri = "sqlite:///steam_top_2000x100.db"
+    db_uri = "sqlite:///steam_clean_top2000.db"
     db = SQLDatabase.from_uri(db_uri)
     return db
 
@@ -55,7 +54,6 @@ def build_llm():
         temperature=0,
         api_key=os.getenv("OPENAI_API_KEY"),
     )
-
 
 
 def load_vector_stores() -> Dict[str, Chroma]:
@@ -250,7 +248,6 @@ def summarize_reviews(
 CUSTOM_TOOLS = [get_current_time, get_similar_games, summarize_reviews]
 
 
-
 def build_agent():
     if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("missing api key")
@@ -265,30 +262,59 @@ def build_agent():
         agent_type="openai-tools",
         verbose=True,
         prefix=(
-            f"You are a Steam game recommendation assistant. "
-            "You can use a SQLite database with tables 'steam_games' and 'steam_reviews' "
-            "for factual information such as tags, genres, prices, release dates, and "
-            "review sentiment. "
-            "You also have a tool called get_similar_games(category, query, k), which "
-            "finds games similar to a given input based on a chosen semantic category. "
-            "If get_similar_games return the same games in the same series, increase k and look for other similar games"
-            "The category option 'tags' focuses on user-defined tags, 'genres' focuses "
-            "on genre information, 'clean_about' focuses on description and theme, 'reviews' "
-            "focuses on how players talk about the game, and 'mixed' combines all "
-            "available text fields into a single similarity profile. "
-            "Use SQL when the user needs exact filters or numeric comparisons. "
-            "Use get_similar_games when the user wants recommendations similar in style, "
-            "tone, mechanics, mood, or how players discuss the game. "
-            "When making recommendations, clearly explain why each game fits the request, "
-            "name the games directly, and include insights or sentiment summaries from "
-            "the 'steam_reviews' table when relevant. "
-            "use the 'steam_reviews' table's 'clean_review' column to get a sense of the public opinion of a game in a cleaner way."
-            "Call get_current_time every time and be aware of the date of request"
-            "When recommending multiple games, always recommend the one with better reviews and more player counts"
-            "Don't recommend multiple games in the same franchise to user, but always recommand more than two games"
+            "You are a Steam game recommendation assistant. "
+            "You can use a SQLite database with tables 'steam_games_clean' and "
+            "'steam_reviews_clean' for factual information. "
+            "In 'steam_games_clean', key numeric fields are: price_val (numeric price), "
+            "positive_rate (0.0-1.0), all_review_count, recent_review_count, "
+            "avg_playtime_forever, and rank. "
+            "You also have a tool called get_similar_games(category, query, k) for semantic search. "
+            
+            "STRATEGY: "
+            "1. Use SQL tools when the user asks for exact stats, rankings, counts, or numeric filtering. "
+            "2. Use get_similar_games when the user asks for style, vibe, plot, or 'games like X'. "
+            "3. If get_similar_games returns multiple entries from the same series, look for more diverse options. "
+            "4. Always call get_current_time to know the date. "
+            
+            "VISUALIZATION RULES (CRITICAL): "
+            "In addition to your text answer, you MUST decide if a visualization helps using the following STRICT rules. "
+            "Do NOT default to bar charts. Analyze the user's analytic intent: "
+            
+            "1. USE 'SCATTER' CHART: When the user asks about the RELATIONSHIP, CORRELATION, or TRADE-OFF between two metrics. "
+            "   - Example: 'Is expensive game better?' -> x_field='price_val', y_field='positive_rate'. "
+            "   - Example: 'Price vs Playtime' -> x_field='price_val', y_field='avg_playtime_forever'. "
+            "   - NOTE: Always use 'price_val' for plotting price, NEVER 'price'. "
+            
+            "2. USE 'BOX' CHART: When the user asks about DISTRIBUTIONS, SPREAD, or VARIABILITY within categories. "
+            "   - Example: 'How much do RPGs usually cost?' -> y_field='price_val'. "
+            "   - Example: 'Distribution of playtime for Action games'. "
+            
+            "3. USE 'BAR' CHART: ONLY when comparing specific values across specific named games or categories. "
+            "   - Example: 'Top 5 games by reviews', 'Compare ratings of Game A and Game B'. "
+            "   - Requirement: Each bar MUST have a distinct color mapped to the game name. "
+            
+            "4. USE 'PIE' CHART: When the user asks about PROPORTIONS or COMPOSITION. "
+            "   - Example: 'Percentage of Free vs Paid games', 'Genre market share'. "
+            
+            "5. USE 'LINE' CHART: When the user asks about TRENDS over time. "
+            "   - Example: 'Review trends over years'. "
+            
+            "6. USE 'HISTOGRAM': When asking for the general distribution of a single metric across the whole database. "
+            "   - Example: 'Distribution of review scores'. "
+
+            "SQL GENERATION RULES: "
+            "When generating SQL for ranking (e.g., top 5), do NOT use LIMIT alone. "
+            "Use tie-aware logic (e.g., WHERE value >= (SELECT value FROM ... LIMIT 1 OFFSET 4)). "
+            
+            "OUTPUT FORMAT: "
+            "At the end of your answer, you MUST output exactly one line beginning with 'VIS_PLAN_JSON: ' followed by a single-line JSON object. "
+            "Keys: 'plots' (list of objects). Each object has: 'chart_type' (bar, line, scatter, histogram, box, pie), 'reason', 'sql_query', 'x_field', 'y_field'. "
+            "The 'sql_query' MUST use correct column names from 'steam_games_clean' (e.g., price_val, positive_rate). "
+            "If no plot is needed, 'plots' should be an empty list. "
+            "Ensure the JSON is valid, single-line, and has no trailing text."
         ),
         extra_tools=CUSTOM_TOOLS,
-    )
+    ),
     return agent
 
 
@@ -304,10 +330,10 @@ def interactive_loop(agent):
 
         if not user_input.strip():
             continue
-        
+
 
         resp = agent.invoke({"input": user_input})
-        
+
         print("\nAgent:", resp["output"], "\n")
         print('-*'*50)
 
