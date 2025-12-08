@@ -133,8 +133,121 @@ def get_similar_games(
         )
     return results
 
+# review_analyzer.py
 
-CUSTOM_TOOLS = [get_current_time, get_similar_games]
+@tool
+def summarize_reviews(
+    appid: int,
+    max_sentences: int = 80,
+):
+    """
+    Summarize Steam reviews concisely (2–3 bullets each section).
+    Uses sqlite3 directly and compresses repeated concepts.
+    """
+
+    import re
+    from typing import List
+    import pandas as pd
+    import sqlite3
+
+    # --- Load reviews using agent's SQL engine ---
+    # query = f"SELECT clean_review, votes_up, help_score FROM steam_reviews WHERE appid = {appid};"
+    DB_PATH = "steam_top_2000x100.db"
+
+    # --- Load reviews using sqlite3 (same approach as build_steam_vector_store.py) ---
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        f"""
+        SELECT clean_review, votes_up, help_score
+        FROM steam_reviews
+        WHERE appid = {appid}
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        return {"error": "No reviews found for this appid"}
+
+    # Convert to DataFrame
+    df = pd.DataFrame(rows, columns=["clean_review", "votes_up", "help_score"])
+
+    # df = pd.DataFrame(df)
+
+    # --- keyword categories ---
+    CATEGORIES = {
+        "gameplay": [
+            "combat","melee","ranged","shooting","aim","accuracy","recoil",
+            "movement","sprint","dash","dodge","roll","parry","block","counter",
+            "weapon","gun","rifle","pistol","shotgun","bow","sword","ammo","reload",
+            "enemy","boss","npc","ai","stealth",
+            "mechanic","system","feature","mission","quest","progression",
+            "build","perk","talent","skilltree","ability","cooldown",
+            "loot","inventory","equipment","armor","upgrade"
+        ],
+        "performance": [
+            "performance","optimization","lag","stutter","fps","framerate",
+            "crash","freeze","bug","glitch","exploit","shader","loading","tearing"
+        ],
+        "content": [
+            # story + world
+            "story","narrative","writing","dialogue","character","plot","lore","world",
+            # content amount
+            "content","replayability","openworld","sandbox","questline","campaign",
+            # ui/visual
+            "ui","hud","interface","accessibility","visual","graphics","lighting",
+            "effect","sound","audio","music","soundtrack","voice"
+        ]
+    }
+
+    def extract(df, keywords):
+        pattern = "|".join([re.escape(k) for k in keywords])
+        mask = df["clean_review"].str.contains(pattern, case=False, regex=True)
+        return (
+            df[mask]
+            .sort_values("help_score", ascending=False)
+            ["clean_review"]
+            .head(max_sentences)
+            .tolist()
+        )
+
+    pos = df[df["votes_up"] > 0]["clean_review"].head(max_sentences).tolist()
+    neg = df[df["votes_up"] == 0]["clean_review"].head(max_sentences).tolist()
+
+    llm = build_llm()
+
+    def summarize(texts, title):
+        if not texts:
+            return f"No {title} related comments found."
+        prompt = f"""
+        Summarize the following player review sentences about **{title}**.
+
+        RULES:
+        - base summary *only* on what appears in the text
+        - combine and compress repeated or similar points
+        - remove filler / redundant comments
+        - avoid long explanations
+        - output 2–4 short bullet points**
+        - bullets must be crisp, factual, non-hallucinated
+
+        Sentences:
+        {chr(10).join(texts)}
+        """
+        return llm.invoke(prompt).content
+
+    result = {
+        "positive": summarize(pos, "positive feedback"),
+        "negative": summarize(neg, "negative feedback"),
+        "gameplay": summarize(extract(df, CATEGORIES["gameplay"]), "gameplay"),
+        "performance": summarize(extract(df, CATEGORIES["performance"]), "performance"),
+        "content": summarize(extract(df, CATEGORIES["content"]), "content & world & UI"),
+    }
+
+    return result
+
+
+CUSTOM_TOOLS = [get_current_time, get_similar_games, summarize_reviews]
 
 
 
@@ -160,7 +273,7 @@ def build_agent():
             "finds games similar to a given input based on a chosen semantic category. "
             "If get_similar_games return the same games in the same series, increase k and look for other similar games"
             "The category option 'tags' focuses on user-defined tags, 'genres' focuses "
-            "on genre information, 'about' focuses on description and theme, 'reviews' "
+            "on genre information, 'clean_about' focuses on description and theme, 'reviews' "
             "focuses on how players talk about the game, and 'mixed' combines all "
             "available text fields into a single similarity profile. "
             "Use SQL when the user needs exact filters or numeric comparisons. "
@@ -169,6 +282,7 @@ def build_agent():
             "When making recommendations, clearly explain why each game fits the request, "
             "name the games directly, and include insights or sentiment summaries from "
             "the 'steam_reviews' table when relevant. "
+            "use the 'steam_reviews' table's 'clean_review' column to get a sense of the public opinion of a game in a cleaner way."
             "Call get_current_time every time and be aware of the date of request"
             "When recommending multiple games, always recommend the one with better reviews and more player counts"
             "Don't recommend multiple games in the same franchise to user, but always recommand more than two games"
