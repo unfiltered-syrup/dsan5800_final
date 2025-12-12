@@ -41,11 +41,9 @@ Direct usage of the official Steam API was deemed insufficient due to restrictiv
 Raw data undergoes a rigorous cleaning pipeline before ingestion:
 1.  **Text Processing:** Removal of stopwords, lemmatization, and noise filtering (HTML tags, URLs).
 2.  **Feature Extraction:** Calculation of `avg_playtime`, `positive_rate`, and `price_val` (numeric conversion).
-3.  **Help Score Calculation:** Reviews are scored to prioritize quality using the formula:
 
-$$
-\text{help\_score} = 0.3 \times \log(1 + \text{votes\_up}) + 0.7 \times \text{info\_density}
-$$
+3.  **Help Score Calculation:** Reviews are scored to prioritize quality using the formula:
+    $$\text{help\_score} = 0.3 \times \log(1 + \text{votes\_up}) + 0.7 \times \text{info\_density}$$
 
 4.  **Vectorization:** Cleaned data is processed with `SentenceTransformer` ("all-MiniLM-L6-v2") and stored in a **Chroma Vector Store**. We created specific indices for **Tags**, **Genres**, **About**, **Reviews**, and a **Mixed** embedding field to support diverse similarity searches.
 
