@@ -45,7 +45,7 @@ Frontend (Svelte) → FastAPI Backend → LangChain Agent
 
 1. **Install dependencies**:
    ```bash
-   uv sync  # or: pip install -r requirements.txt
+   uv sync  
    ```
 
 2. **Set environment variable**:
