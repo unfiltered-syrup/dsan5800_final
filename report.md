@@ -43,7 +43,7 @@ Raw data undergoes a rigorous cleaning pipeline before ingestion:
 2.  **Feature Extraction:** Calculation of `avg_playtime`, `positive_rate`, and `price_val` (numeric conversion).
 
 3.  **Help Score Calculation:** Reviews are scored to prioritize quality using the formula:
-    $$\text{help\_score} = 0.3 \times \log(1 + \text{votes\_up}) + 0.7 \times \text{info\_density}$$
+    `help_score = 0.3 * log(1 + votes_up) + 0.7 * info_density`
 
 4.  **Vectorization:** Cleaned data is processed with `SentenceTransformer` ("all-MiniLM-L6-v2") and stored in a **Chroma Vector Store**. We created specific indices for **Tags**, **Genres**, **About**, **Reviews**, and a **Mixed** embedding field to support diverse similarity searches.
 
