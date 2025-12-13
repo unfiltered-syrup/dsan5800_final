@@ -148,6 +148,121 @@ mpl.rcParams["legend.fontsize"] = 11
 COLOR_PRIMARY = "#1f77b4"
 COLOR_SECONDARY = "#ff7f0e"
 COLOR_TERTIARY = "#2ca02c"
+# review_analyzer.py
+
+@tool
+def summarize_reviews(
+    appid: int,
+    max_sentences: int = 80,
+):
+    """
+    Summarize Steam reviews concisely (2–3 bullets each section).
+    Uses sqlite3 directly and compresses repeated concepts.
+    """
+
+    import re
+    from typing import List
+    import pandas as pd
+    import sqlite3
+
+    # --- Load reviews using agent's SQL engine ---
+    # query = f"SELECT clean_review, votes_up, help_score FROM steam_reviews WHERE appid = {appid};"
+    DB_PATH = "steam_clean_top2000.db"
+
+    # --- Load reviews using sqlite3 (same approach as build_steam_vector_store.py) ---
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        f"""
+        SELECT clean_review, votes_up, help_score
+        FROM steam_reviews
+        WHERE appid = {appid}
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        return {"error": "No reviews found for this appid"}
+
+    # Convert to DataFrame
+    df = pd.DataFrame(rows, columns=["clean_review", "votes_up", "help_score"])
+
+    # df = pd.DataFrame(df)
+
+    # --- keyword categories ---
+    CATEGORIES = {
+        "gameplay": [
+            "combat","melee","ranged","shooting","aim","accuracy","recoil",
+            "movement","sprint","dash","dodge","roll","parry","block","counter",
+            "weapon","gun","rifle","pistol","shotgun","bow","sword","ammo","reload",
+            "enemy","boss","npc","ai","stealth",
+            "mechanic","system","feature","mission","quest","progression",
+            "build","perk","talent","skilltree","ability","cooldown",
+            "loot","inventory","equipment","armor","upgrade"
+        ],
+        "performance": [
+            "performance","optimization","lag","stutter","fps","framerate",
+            "crash","freeze","bug","glitch","exploit","shader","loading","tearing"
+        ],
+        "content": [
+            # story + world
+            "story","narrative","writing","dialogue","character","plot","lore","world",
+            # content amount
+            "content","replayability","openworld","sandbox","questline","campaign",
+            # ui/visual
+            "ui","hud","interface","accessibility","visual","graphics","lighting",
+            "effect","sound","audio","music","soundtrack","voice"
+        ]
+    }
+
+    def extract(df, keywords):
+        pattern = "|".join([re.escape(k) for k in keywords])
+        mask = df["clean_review"].str.contains(pattern, case=False, regex=True)
+        return (
+            df[mask]
+            .sort_values("help_score", ascending=False)
+            ["clean_review"]
+            .head(max_sentences)
+            .tolist()
+        )
+
+    pos = df[df["votes_up"] > 0]["clean_review"].head(max_sentences).tolist()
+    neg = df[df["votes_up"] == 0]["clean_review"].head(max_sentences).tolist()
+
+    llm = build_llm()
+
+    def summarize(texts, title):
+        if not texts:
+            return f"No {title} related comments found."
+        prompt = f"""
+        Summarize the following player review sentences about **{title}**.
+
+        RULES:
+        - base summary *only* on what appears in the text
+        - combine and compress repeated or similar points
+        - remove filler / redundant comments
+        - avoid long explanations
+        - output 2–4 short bullet points**
+        - bullets must be crisp, factual, non-hallucinated
+
+        Sentences:
+        {chr(10).join(texts)}
+        """
+        return llm.invoke(prompt).content
+
+    result = {
+        "positive": summarize(pos, "positive feedback"),
+        "negative": summarize(neg, "negative feedback"),
+        "gameplay": summarize(extract(df, CATEGORIES["gameplay"]), "gameplay"),
+        "performance": summarize(extract(df, CATEGORIES["performance"]), "performance"),
+        "content": summarize(extract(df, CATEGORIES["content"]), "content & world & UI"),
+    }
+
+    return result
+
+
+CUSTOM_TOOLS = [get_current_time, get_similar_games, summarize_reviews]
 
 ENGINE = create_engine("sqlite:///steam_clean_top2000.db")
 
@@ -187,7 +302,7 @@ def _draw_single_plot(plot_cfg: Dict[str, Any], idx: int) -> None:
 
     print(f"\n[Plot {idx}] {reason}")
     if not sql:
-        print(f"[WARN] Plot {idx}: empty sql_query, skip.")
+        print(f" Plot {idx}: empty sql_query, skip.")
         return
 
     try:
@@ -199,16 +314,16 @@ def _draw_single_plot(plot_cfg: Dict[str, Any], idx: int) -> None:
         return
 
     if df.empty:
-        print(f"[INFO] Plot {idx}: query returned no rows, skip.")
+        print(f" Plot {idx}: query returned no rows, skip.")
         return
 
-    print(f"[INFO] Plot {idx}: Data columns:", df.columns.tolist())
+    print(f" Plot {idx}: Data columns:", df.columns.tolist())
 
     fig, ax = plt.subplots()
 
     if chart_type == "bar":
         if x_field not in df.columns or y_field not in df.columns:
-            print(f"[WARN] Plot {idx}: bar needs x_field={x_field}, y_field={y_field}.")
+            print(f" Plot {idx}: bar needs x_field={x_field}, y_field={y_field}.")
             plt.close(fig)
             return
 
@@ -237,7 +352,7 @@ def _draw_single_plot(plot_cfg: Dict[str, Any], idx: int) -> None:
     elif chart_type == "line":
         if x_field not in df.columns or y_field not in df.columns:
             print(
-                f"[WARN] Plot {idx}: line needs x_field={x_field}, y_field={y_field}."
+                f" Plot {idx}: line needs x_field={x_field}, y_field={y_field}."
             )
             plt.close(fig)
             return
@@ -256,7 +371,7 @@ def _draw_single_plot(plot_cfg: Dict[str, Any], idx: int) -> None:
     elif chart_type == "scatter":
         if x_field not in df.columns or y_field not in df.columns:
             print(
-                f"[WARN] Plot {idx}: scatter needs x_field={x_field}, y_field={y_field}."
+                f" Plot {idx}: scatter needs x_field={x_field}, y_field={y_field}."
             )
             plt.close(fig)
             return
@@ -275,7 +390,7 @@ def _draw_single_plot(plot_cfg: Dict[str, Any], idx: int) -> None:
     elif chart_type == "histogram":
         col = x_field or y_field
         if col not in df.columns:
-            print(f"[WARN] Plot {idx}: histogram needs numeric column '{col}'.")
+            print(f" Plot {idx}: histogram needs numeric column '{col}'.")
             plt.close(fig)
             return
 
@@ -293,7 +408,7 @@ def _draw_single_plot(plot_cfg: Dict[str, Any], idx: int) -> None:
     elif chart_type == "box":
         col = y_field or x_field
         if col not in df.columns:
-            print(f"[WARN] Plot {idx}: box needs numeric column '{col}'.")
+            print(f" Plot {idx}: box needs numeric column '{col}'.")
             plt.close(fig)
             return
 
@@ -304,7 +419,7 @@ def _draw_single_plot(plot_cfg: Dict[str, Any], idx: int) -> None:
 
     elif chart_type == "pie":
         if x_field not in df.columns or y_field not in df.columns:
-            print(f"[WARN] Plot {idx}: pie needs x_field={x_field}, y_field={y_field}.")
+            print(f" Plot {idx}: pie needs x_field={x_field}, y_field={y_field}.")
             plt.close(fig)
             return
 
@@ -318,7 +433,7 @@ def _draw_single_plot(plot_cfg: Dict[str, Any], idx: int) -> None:
         ax.axis("equal")
 
     else:
-        print(f"[WARN] Plot {idx}: unknown chart_type '{chart_type}', skip.")
+        print(f" Plot {idx}: unknown chart_type '{chart_type}', skip.")
         plt.close(fig)
         return
 
@@ -330,7 +445,7 @@ def _visualize_from_plan_internal(plan: Dict[str, Any]) -> int:
     """Internal helper: draw all plots from a VIS_PLAN_JSON-like dict. Returns number of plots."""
     plots: List[Dict[str, Any]] = plan.get("plots") or []
     if not plots:
-        print("[INFO] VIS_PLAN_JSON has no plots.")
+        print(" VIS_PLAN_JSON has no plots.")
         return 0
 
     count = 0
@@ -341,7 +456,7 @@ def _visualize_from_plan_internal(plan: Dict[str, Any]) -> int:
 
 
 @tool
-def visualize_from_plan(plan: Dict[str, Any]) -> str:
+def visualize_from_plan(plan: Optional[Dict[str, Any]] = None) -> str:
     """
     LangChain tool: given a VIS_PLAN_JSON-style dict with a top-level 'plots' list,
     execute the SQL queries, render matplotlib charts, and return a short summary.
@@ -360,7 +475,7 @@ def visualize_from_plan(plan: Dict[str, Any]) -> str:
         return f"Failed to render plots from plan due to error: {e}"
 
 
-CUSTOM_TOOLS = [get_current_time, get_similar_games, visualize_from_plan]
+CUSTOM_TOOLS = [get_current_time, get_similar_games, visualize_from_plan, summarize_reviews]
 
 
 def build_agent():
@@ -377,59 +492,70 @@ def build_agent():
         agent_type="openai-tools",
         verbose=True,
         prefix=(
+            # f"You are a Steam game recommendation assistant. "
+            # "You can use a SQLite database with tables 'steam_games' and 'steam_reviews' "
+            # "for factual information such as tags, genres, prices, release dates, and "
+            # "review sentiment. "
+            # "You also have a tool called get_similar_games(category, query, k), which "
+            # "finds games similar to a given input based on a chosen semantic category. "
+            # "If get_similar_games return the same games in the same series, increase k and look for other similar games"
+            # "The category option 'tags' focuses on user-defined tags, 'genres' focuses "
+            # "on genre information, 'about' focuses on description and theme, 'reviews' "
+            # "focuses on how players talk about the game, and 'mixed' combines all "
+            # "available text fields into a single similarity profile. "
+            # "Use SQL when the user needs exact filters or numeric comparisons. "
+            # "Use get_similar_games when the user wants recommendations similar in style, "
+            # "tone, mechanics, mood, or how players discuss the game. "
+            # "When making recommendations, clearly explain why each game fits the request, "
+            # "name the games directly, and include insights or sentiment summaries from "
+            # "the 'steam_reviews' table when relevant. "
+            # "Call get_current_time every time and be aware of the date of request"
+            # "When recommending multiple games, always recommend the one with better reviews and more player counts"
+            # "Don't recommend multiple games in the same franchise to user, but always recommand more than two games"
             "You are a Steam game recommendation assistant. "
-            "You can use a SQLite database with tables 'steam_games_clean' and "
-            "'steam_reviews_clean' for factual information. "
-            "In 'steam_games_clean', key numeric fields are: price_val (numeric price), "
-            "positive_rate (0.0-1.0), all_review_count, recent_review_count, "
-            "avg_playtime_forever, and rank. "
-            "You also have a tool called get_similar_games(category, query, k) for semantic search. "
-            
-            "STRATEGY: "
-            "1. Use SQL tools when the user asks for exact stats, rankings, counts, or numeric filtering. "
-            "2. Use get_similar_games when the user asks for style, vibe, plot, or 'games like X'. "
-            "3. If get_similar_games returns multiple entries from the same series, look for more diverse options. "
-            "4. Always call get_current_time to know the date. "
-            
-            "VISUALIZATION RULES (CRITICAL): "
-            "In addition to your text answer, you MUST decide if a visualization helps using the following STRICT rules. "
-            "Do NOT default to bar charts. Analyze the user's analytic intent: "
-            
-            "1. USE 'SCATTER' CHART: When the user asks about the RELATIONSHIP, CORRELATION, or TRADE-OFF between two metrics. "
-            "   - Example: 'Is expensive game better?' -> x_field='price_val', y_field='positive_rate'. "
-            "   - Example: 'Price vs Playtime' -> x_field='price_val', y_field='avg_playtime_forever'. "
-            "   - NOTE: Always use 'price_val' for plotting price, NEVER 'price'. "
-            
-            "2. USE 'BOX' CHART: When the user asks about DISTRIBUTIONS, SPREAD, or VARIABILITY within categories. "
-            "   - Example: 'How much do RPGs usually cost?' -> y_field='price_val'. "
-            "   - Example: 'Distribution of playtime for Action games'. "
-            
-            "3. USE 'BAR' CHART: ONLY when comparing specific values across specific named games or categories. "
-            "   - Example: 'Top 5 games by reviews', 'Compare ratings of Game A and Game B'. "
-            "   - Requirement: Each bar MUST have a distinct color mapped to the game name. "
-            
-            "4. USE 'PIE' CHART: When the user asks about PROPORTIONS or COMPOSITION. "
-            "   - Example: 'Percentage of Free vs Paid games', 'Genre market share'. "
-            
-            "5. USE 'LINE' CHART: When the user asks about TRENDS over time. "
-            "   - Example: 'Review trends over years'. "
-            
-            "6. USE 'HISTOGRAM': When asking for the general distribution of a single metric across the whole database. "
-            "   - Example: 'Distribution of review scores'. "
+            "You can use a SQLite database with tables 'steam_games' and "
+            "'steam_reviews' for factual information such as tags, genres, "
+            "prices, release dates, review counts, review sentiment, and playtime. "
+            "You also have a tool called get_similar_games(category, query, k), which "
+            "finds games similar to a given input based on a chosen semantic category. "
+            "If get_similar_games returns multiple entries from the same game series, "
+            "increase k and look for additional diverse games. "
+            "The category option 'tags' focuses on user-defined tags, 'genres' focuses "
+            "on genre information, 'clean_about' focuses on description and theme, 'reviews' "
+            "focuses on how players talk about the game, and 'mixed' combines all "
+            "available text fields into a single similarity profile. "
+            "Use SQL when the user needs exact filters or numeric comparisons. "
+            "Use get_similar_games when the user wants recommendations similar in style, "
+            "tone, mechanics, mood, or how players discuss the game. "
+            "When making recommendations, clearly explain why each game fits the request, "
+            "name the games directly, and include insights or sentiment summaries from "
+            "the 'steam_reviews' table when relevant. "
+            "Always call get_current_time at least once per conversation to keep track "
+            "of the current date. "
+            "When recommending multiple games, prefer those with stronger reviews and "
+            "more review counts, and avoid recommending multiple entries from the same "
+            "franchise in a single answer. Always recommend more than two games when "
+            "it makes sense for the user. "
+            "In table 'steam_games', numeric fields include rank (popularity rank, where smaller is more popular), recent_review_count, all_review_count, avg_playtime_forever, avg_playtime_review, positive_rate (fraction of positive reviews from 0 to 1), and useful_rate (fraction of helpful reviews). In table 'steam_reviews_clean', numeric fields include voted_up, votes_up, votes_funny, playtime_forever, playtime_at_review, and timestamps created_date and updated_date, which can be grouped by day, month, or year to show trends."
 
-            "SQL GENERATION RULES: "
-            "When generating SQL for ranking (e.g., top 5), do NOT use LIMIT alone. "
-            "Use tie-aware logic (e.g., WHERE value >= (SELECT value FROM ... LIMIT 1 OFFSET 4)). "
-            
-            "OUTPUT FORMAT: "
-            "At the end of your answer, you MUST output exactly one line beginning with 'VIS_PLAN_JSON: ' followed by a single-line JSON object. "
-            "Keys: 'plots' (list of objects). Each object has: 'chart_type' (bar, line, scatter, histogram, box, pie), 'reason', 'sql_query', 'x_field', 'y_field'. "
-            "The 'sql_query' MUST use correct column names from 'steam_games_clean' (e.g., price_val, positive_rate). "
-            "If no plot is needed, 'plots' should be an empty list. "
-            "Ensure the JSON is valid, single-line, and has no trailing text."
+            "In addition to your normal answer, you MUST also visualize. Choose visualization types based on the semantics of the question: if the user asks for the “fastest,” “highest,” “top,” “best,” or “most” game (for example: “the most popular game,” “the best,” “top game,” “highest rated game”), treat this as a ranking problem. In those cases, always consider plotting a bar chart comparing the top five or ten games on the relevant metric such as all_review_count, recent_review_count, positive_rate, or avg_playtime_forever, and also consider a scatter plot relating that metric to another numeric variable, such as review score versus price or playtime. When a question involves numeric metrics varying along another axis—such as review_score versus price, positive_rate versus all_review_count, or avg_playtime_forever versus positive_rate—you should prefer scatter plots, and optionally line plots if there is a clear ordering such as time or rank. When the question involves categories such as genres, tags, or developers, consider bar charts of aggregated values by category and boxplots showing the distribution of a metric within each category. Only draw a global histogram or distribution plot when the question explicitly asks about overall distributions—for example questions about “in general,” “on average,” or “how are games distributed”—and avoid drawing irrelevant global histograms that are not directly tied to the user’s intent. Whenever you use a numeric metric such as positive_rate, useful_rate, review counts, or playtime, you may add distributional visualizations such as histograms or boxplots to show spread and outliers, but they must always be clearly related to the user’s question. You may propose between zero and four plots in total, and you should prefer diversity in chart types rather than repeating similar ones; every plot you propose must feel targeted and analytical rather than generic."
+
+            "For bar charts, each bar MUST have a distinct color determined by the game. Every bar chart MUST include a legend mapping each color to the game name, and each bar MUST display its numeric value above the bar. All charts must follow clear visual aesthetics with readable fonts, clean gridlines, proper spacing, and visually distinct colors."
+
+            "When generating SQL for ranking queries such as top 5, best game, or most popular, you MUST NOT use LIMIT alone. Instead, you MUST perform tie-aware selection. If the N-th game shares the same metric value with additional games, you must include ALL games tied at that value so that the final set may exceed N. Preferred SQL patterns include using RANK() OVER (ORDER BY metric DESC) or selecting the threshold value with OFFSET and including all rows greater than or equal to that value."
+
+            "At the end of your answer, you MUST output exactly one line beginning with “VIS_PLAN_JSON: ” followed by a single-line JSON object describing your visualization plan. This JSON object must have a top-level key named “plots,” whose value is a list of zero to four objects. Each object represents one plot and must contain the keys chart_type, reason, sql_query, x_field, and y_field. The chart_type must be one of “bar,” “line,” “scatter,” “histogram,” “box,” or “pie.” The reason must briefly explain what the plot shows and why it is relevant. The sql_query must be a valid SQL query over the tables 'steam_games' or 'steam_reviews_clean' that returns the data needed for the plot. The x_field and y_field must be column names from the query result or null. For histograms, x_field should be the numeric column and y_field should be null. For boxplots, y_field should be the numeric column and x_field should be null. If no numeric visualization makes sense, the JSON must still be valid and must contain an empty list for “plots,” while your natural-language answer should explain why no plot is appropriate. The JSON must be syntactically valid: use double quotes for all keys and string values, never include trailing commas, and keep the entire JSON object on a single line after “VIS_PLAN_JSON: ” without adding any additional commentary."
+            "the 'steam_reviews' table when relevant. "
+            "The raw number of positive and negative reviews in the reviews database is not a indicator of overall reviews for the game since they are randomly sampled"
+            "When people ask 'what are people saying about this game' use the 'steam_reviews' table's 'clean_review' column to provide examples."
+            "WHEN USER ASK ABOUT OVERALL REVIEW OF THE GAME USE overall_reviews and recent_reviews TO GET RECENT AND OVERALL SENTIMENT OF THE GAME, DONT COUNT REVIEWS IN THE REVIEW TABLE SINCE THEY ARE NOT SAMPLED CORRECTLY"
+            "Call get_current_time every time and be aware of the date of request"
+            "When recommending multiple games, always recommend the one with better reviews and more player counts"
+            "Don't recommend multiple games in the same franchise to user, but always recommand more than two games"
+            "The title of the graph should be very short and concise"
         ),
         extra_tools=CUSTOM_TOOLS,
-    ),
+    )
     return agent
 
 
@@ -451,7 +577,7 @@ def split_answer_and_vis_plan(text: str) -> Tuple[str, Optional[Dict[str, Any]]]
     try:
         plan = json.loads(json_str)
     except json.JSONDecodeError:
-        print("[WARN] Failed to parse VIS_PLAN_JSON JSON. Raw line:")
+        print(" Failed to parse VIS_PLAN_JSON JSON. Raw line:")
         print(vis_line)
         return main_text, None
 
@@ -461,7 +587,7 @@ def split_answer_and_vis_plan(text: str) -> Tuple[str, Optional[Dict[str, Any]]]
 def interactive_loop(agent):
     while True:
         try:
-            user_input = input("You: ")
+            user_input = input("You: ") + ". VISUALIZE"
         except (EOFError, KeyboardInterrupt):
             break
 
@@ -478,9 +604,10 @@ def interactive_loop(agent):
 
         print("\nAgent:", resp["output"], "\n")
         if plan is not None:
+            print('Plan gneerated:'+ plan)
             _visualize_from_plan_internal(plan)
         else:
-            print("[INFO] No VIS_PLAN_JSON found; skipping visualization.")
+            print(" No VIS_PLAN_JSON found; skipping visualization.")
         print('-*'*50)
 
 
