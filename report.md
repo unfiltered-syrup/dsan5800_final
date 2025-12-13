@@ -48,7 +48,7 @@ Raw data undergoes a rigorous cleaning pipeline before ingestion:
 4.  **Vectorization:** Cleaned data is processed with `SentenceTransformer` ("all-MiniLM-L6-v2") and stored in a **Chroma Vector Store**. We created specific indices for **Tags**, **Genres**, **About**, **Reviews**, and a **Mixed** embedding field to support diverse similarity searches.
 
 ### 3.3 Agent Architecture and Toolset
-The core reasoning engine is built on **LangChain** and **GPT-4o-mini**, hosted on a **FastAPI** backend. To solve complex user queries, the agent is equipped with a specialized set of custom tools:
+The core reasoning engine is built on **LangChain** and **gpt-4.1-mini**, hosted on a **FastAPI** backend. To solve complex user queries, the agent is equipped with a specialized set of custom tools:
 
 * **`sql_db_query` (Left Brain):**
     * **Function:** Executes raw SQL queries against the `steam_clean.db` SQLite database.
@@ -87,11 +87,13 @@ We evaluated the system using a set of real-world queries designed to stress-tes
 * **Result:** Instead of simply returning generic RPGs, the system retrieved titles known for emotional storytelling, retro aesthetics, and player choices (e.g., *Omori*, *Deltarune*), validating the effectiveness of the embedding-based search over keyword matching.
 
 ### 4.2 Scenario B: Analytical Visualization (SQL + Plotting)
-* **Query:** *"What is the popularity trend of the action genre? Visualize"*
-* **Mechanism:** The agent parsed two distinct intents: "Trend" (Time-series data) and "Visualize" (Chart generation).
-    1.  It executed a SQL query aggregating review counts or release frequency for games tagged "Action" over yearly intervals.
-    2.  It generated a `VIS_PLAN_JSON` specifying a **Line Chart** (x-axis: Year, y-axis: Count).
-* **Result:** The frontend rendered an interactive line chart showing the growth of the Action genre over the last decade, with the agent adding textual commentary on peak years.
+* **Query:** *"What are some popular new games? Visualize"*
+* **Mechanism:** The agent parsed a complex intent involving **Ranking** (Top 10), **Filtering** (New Games), and **Visualization**.
+    1.  **SQL Execution:** It generated a SQL query to select the top 10 unreleased or recently announced games (based on 'coming soon' or recent release dates), sorting them by `all_review_count` (proxy for hype/popularity).
+    2.  **Visualization Planning:** The agent determined that comparing magnitudes across discrete items is best served by a **Bar Chart**. It generated a `VIS_PLAN_JSON` specifying the x-axis as "Game Name" and y-axis as "Review Count".
+* **Result:** The frontend rendered a color-coded bar chart displaying highly anticipated titles like *Hollow Knight: Silksong* and *Battlefield 6*. This visual instantly highlighted the massive gap in player interest between the top titles and the rest of the pack.
+
+![sample_output](./sample_output.png)
 
 ### 4.3 Scenario C: Qualitative Review Synthesis (Summarization)
 * **Query:** *"Review summary for infinity nikki"*

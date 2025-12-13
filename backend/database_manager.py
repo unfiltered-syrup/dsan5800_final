@@ -9,7 +9,7 @@ if __name__ == "__main__":
     parser.add_argument('-r', '--refresh') # refresh ranking
 
     fetcher = DataFetcher(
-        db_path="steam_top_100x200.db",
+        db_path="steam_top_2000x100.db",
         target_count=100,
         filter_mode="globaltopsellers",
     )

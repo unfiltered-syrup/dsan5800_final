@@ -13,7 +13,7 @@ from sentence_transformers import SentenceTransformer
 
 
 
-DB_PATH = "steam_top_2000x100.db"
+DB_PATH = "steam_clean_top2000.db"
 
 PERSIST_DIR = "steam_vector_store"
 
